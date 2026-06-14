@@ -6,6 +6,7 @@ import com.soundkh.entity.Track;
 import com.soundkh.entity.User;
 import com.soundkh.repository.AccessRequestRepository;
 import com.soundkh.repository.ChannelRepository;
+import com.soundkh.repository.LikeRepository;
 import com.soundkh.repository.SubscriptionRepository;
 import com.soundkh.repository.TrackRepository;
 import com.soundkh.repository.UserRepository;
@@ -36,12 +37,16 @@ public class TrackService {
     private final TranscodingService transcodingService;
     private final SubscriptionRepository subscriptionRepository;
     private final ChannelAccessRequestService channelAccessRequestService;
+    private final LikeRepository likeRepository;
+    private final ChannelManagerService channelManagerService;
 
     public TrackService(TrackRepository trackRepository, ChannelRepository channelRepository,
                         UserRepository userRepository, AccessRequestRepository accessRequestRepository,
                         S3StorageService s3, TranscodingService transcodingService,
                         SubscriptionRepository subscriptionRepository,
-                        ChannelAccessRequestService channelAccessRequestService) {
+                        ChannelAccessRequestService channelAccessRequestService,
+                        LikeRepository likeRepository,
+                        ChannelManagerService channelManagerService) {
         this.trackRepository = trackRepository;
         this.channelRepository = channelRepository;
         this.userRepository = userRepository;
@@ -50,6 +55,8 @@ public class TrackService {
         this.transcodingService = transcodingService;
         this.subscriptionRepository = subscriptionRepository;
         this.channelAccessRequestService = channelAccessRequestService;
+        this.likeRepository = likeRepository;
+        this.channelManagerService = channelManagerService;
     }
 
     // Phase 6: Upload with genre
@@ -164,8 +171,9 @@ public class TrackService {
     public TrackDto.Response update(Long trackId, TrackDto.UpdateRequest req, String username) {
         var track = trackRepository.findById(trackId)
                 .orElseThrow(() -> new IllegalArgumentException("Track not found"));
-        if (!track.getChannel().getCreator().getUsername().equals(username))
-            throw new AccessDeniedException("Not your track");
+        boolean isOwner = track.getChannel().getCreator().getUsername().equals(username);
+        boolean isManager = channelManagerService.isManager(track.getChannel().getId(), username);
+        if (!isOwner && !isManager) throw new AccessDeniedException("Not authorized");
         if (req.title() != null) track.setTitle(req.title());
         if (req.genre() != null) track.setGenre(req.genre());
         if (req.visibility() != null) track.setVisibility(req.visibility());
@@ -193,15 +201,18 @@ public class TrackService {
     public void delete(Long trackId, String username) {
         var track = trackRepository.findById(trackId)
                 .orElseThrow(() -> new IllegalArgumentException("Track not found"));
-        if (!track.getChannel().getCreator().getUsername().equals(username))
-            throw new AccessDeniedException("Not your track");
+        boolean isOwner = track.getChannel().getCreator().getUsername().equals(username);
+        boolean isManager = channelManagerService.isManager(track.getChannel().getId(), username);
+        if (!isOwner && !isManager) throw new AccessDeniedException("Not authorized");
         s3.deleteAudio(track.getS3ObjectKey());
         trackRepository.delete(track);
     }
 
     private TrackDto.Response toResponse(Track t) {
+        long likeCount = likeRepository.countByTrackId(t.getId());
         return new TrackDto.Response(t.getId(), t.getTitle(), t.getGenre(),
-                t.getDuration(), t.getVisibility().name(), t.getPlayCount(), t.getChannel().getId());
+                t.getDuration(), t.getVisibility().name(), t.getPlayCount(), likeCount,
+                t.getChannel().getId(), t.getChannel().getName());
     }
 
     public record StreamResult(

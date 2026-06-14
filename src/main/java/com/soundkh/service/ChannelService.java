@@ -14,10 +14,13 @@ public class ChannelService {
 
     private final ChannelRepository channelRepository;
     private final UserRepository userRepository;
+    private final ChannelFollowService channelFollowService;
 
-    public ChannelService(ChannelRepository channelRepository, UserRepository userRepository) {
+    public ChannelService(ChannelRepository channelRepository, UserRepository userRepository,
+                          ChannelFollowService channelFollowService) {
         this.channelRepository = channelRepository;
         this.userRepository = userRepository;
+        this.channelFollowService = channelFollowService;
     }
 
     public ChannelDto.Response create(ChannelDto.CreateRequest req, String username) {
@@ -35,9 +38,9 @@ public class ChannelService {
         return channelRepository.findByCreatorId(user.getId()).stream().map(this::toResponse).toList();
     }
 
-    public ChannelDto.Response get(Long id) {
+    public ChannelDto.Response get(Long id, String viewerUsername) {
         return toResponse(channelRepository.findById(id)
-                .orElseThrow(() -> new IllegalArgumentException("Channel not found")));
+                .orElseThrow(() -> new IllegalArgumentException("Channel not found")), viewerUsername);
     }
 
     public List<ChannelDto.Response> getFeatured() {
@@ -67,7 +70,13 @@ public class ChannelService {
     }
 
     private ChannelDto.Response toResponse(Channel c) {
+        return toResponse(c, null);
+    }
+
+    private ChannelDto.Response toResponse(Channel c, String viewerUsername) {
+        long followers = channelFollowService.followerCount(c.getId());
+        boolean following = viewerUsername != null && channelFollowService.isFollowing(c.getId(), viewerUsername);
         return new ChannelDto.Response(c.getId(), c.getName(), c.getDescription(),
-                c.isVerified(), c.getCreator().getUsername(), c.getVisibility());
+                c.isVerified(), c.getCreator().getUsername(), c.getVisibility(), followers, following);
     }
 }

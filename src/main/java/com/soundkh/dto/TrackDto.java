@@ -16,7 +16,8 @@ public class TrackDto {
     public record Response(
         Long id, String title, String genre,
         Integer duration, String visibility,
-        long playCount, Long channelId
+        long playCount, long likeCount,
+        Long channelId, String channelName
     ) {}
 
     public record PresignedResponse(String url, long expiresInSeconds) {}
