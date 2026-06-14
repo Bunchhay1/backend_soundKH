@@ -1,0 +1,687 @@
+=========================================================
+PROJECT: soundKH - Audio Distribution Platform
+DOCUMENT: Execution Blueprint - Phase 1 (Foundation)
+AUTHOR: Commander Chhay (Senior Backend Architect)
+DATE: 2026-05-16
+=========================================================
+
+[1] STRATEGIC OBJECTIVE
+Establish a highly scalable, decoupled storage architecture.
+Separate Relational Metadata (User accounts, RBAC, Audio Metadata)
+from Binary Large Objects (BLOBs - Audio Files, Images).
+
+Architecture Principle:
+  PostgreSQL  →  Structured metadata, relationships, RBAC
+  MinIO       →  Binary blobs (audio, images), S3-compatible
+  Spring Boot →  Business logic, API gateway between both layers
+
+Future Scale Path:
+  Phase 1-9   : Local MinIO on Proxmox (zero cost, full control)
+  Phase 10+   : Drop-in swap to AWS S3 (same SDK, same code)
+  Phase 15+   : Read replicas, connection pooling (PgBouncer)
+  Phase 20+   : Sharding, multi-region replication
+
+=========================================================
+[2] INFRASTRUCTURE: docker-compose.yml
+=========================================================
+FILE: docker-compose.yml (project root)
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: soundkh-postgres
+    environment:
+      POSTGRES_DB: soundkh
+      POSTGRES_USER: soundkh
+      POSTGRES_PASSWORD: soundkh_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  minio:
+    image: minio/minio:latest
+    container_name: soundkh-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      mc alias set local http://minio:9000 minioadmin minioadmin123;
+      mc mb --ignore-existing local/soundkh-audio-raw;
+      mc mb --ignore-existing local/soundkh-public-assets;
+      "
+
+volumes:
+  postgres_data:
+  minio_data:
+
+NOTES:
+  - postgres_data volume persists DB across container restarts
+  - minio_data volume persists all uploaded files
+  - minio-init auto-creates both buckets on first run
+  - MinIO Console UI: http://localhost:9001
+
+=========================================================
+[3] SPRING BOOT PROJECT: pom.xml
+=========================================================
+FILE: pom.xml (project root)
+
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.2.5</version>
+    </parent>
+
+    <groupId>com.soundkh</groupId>
+    <artifactId>soundkh</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <name>soundkh</name>
+
+    <properties>
+        <java.version>17</java.version>
+        <aws.sdk.version>2.25.40</aws.sdk.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+            <version>${aws.sdk.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <excludes>
+                        <exclude>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+
+KEY DEPENDENCIES:
+  spring-boot-starter-web       → REST API layer
+  spring-boot-starter-data-jpa  → ORM / Hibernate
+  postgresql                    → JDBC driver (runtime)
+  software.amazon.awssdk:s3     → S3/MinIO client (v2)
+  lombok                        → Boilerplate reduction
+
+=========================================================
+[4] RELATIONAL DATABASE SCHEMA: PostgreSQL
+=========================================================
+
+SCHEMA DESIGN RATIONALE:
+  - All PKs use BIGSERIAL (auto-increment Long) for simplicity in Phase 1
+  - Enums stored as VARCHAR (EnumType.STRING) for readability in DB
+  - created_at / requested_at set at application layer (LocalDateTime.now())
+  - FKs use LAZY fetch to avoid N+1 query problems
+
+TABLE: users
+  id            BIGSERIAL PRIMARY KEY
+  username      VARCHAR NOT NULL UNIQUE
+  email         VARCHAR NOT NULL UNIQUE
+  password_hash VARCHAR NOT NULL
+  role          VARCHAR NOT NULL DEFAULT 'LISTENER'  -- LISTENER | CREATOR | ADMIN
+  created_at    TIMESTAMP NOT NULL
+
+TABLE: channels
+  id            BIGSERIAL PRIMARY KEY
+  creator_id    BIGINT NOT NULL REFERENCES users(id)
+  name          VARCHAR NOT NULL
+  description   TEXT
+  is_verified   BOOLEAN NOT NULL DEFAULT FALSE
+  created_at    TIMESTAMP NOT NULL
+
+TABLE: tracks
+  id            BIGSERIAL PRIMARY KEY
+  channel_id    BIGINT NOT NULL REFERENCES channels(id)
+  title         VARCHAR NOT NULL
+  duration      INTEGER                               -- seconds
+  s3_object_key VARCHAR NOT NULL                     -- MinIO object key
+  visibility    VARCHAR NOT NULL DEFAULT 'PRIVATE'   -- PUBLIC | PRIVATE
+  created_at    TIMESTAMP NOT NULL
+
+TABLE: access_requests
+  id            BIGSERIAL PRIMARY KEY
+  track_id      BIGINT NOT NULL REFERENCES tracks(id)
+  user_id       BIGINT NOT NULL REFERENCES users(id)
+  status        VARCHAR NOT NULL DEFAULT 'PENDING'   -- PENDING | APPROVED | REJECTED
+  requested_at  TIMESTAMP NOT NULL
+
+SCALE NOTES (future phases):
+  Phase 5  → Add indexes: tracks(channel_id), tracks(visibility), access_requests(status)
+  Phase 8  → Partition tracks table by created_at (range partitioning)
+  Phase 12 → Migrate to UUID PKs for distributed ID generation
+  Phase 15 → Add full-text search index on tracks(title)
+
+=========================================================
+[5] JPA ENTITY CLASSES
+=========================================================
+
+FILE: src/main/java/com/soundkh/entity/User.java
+
+package com.soundkh.entity;
+
+import jakarta.persistence.*;
+import lombok.Getter;
+import lombok.Setter;
+import java.time.LocalDateTime;
+
+@Entity
+@Table(name = "users")
+@Getter @Setter
+public class User {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(nullable = false, unique = true)
+    private String username;
+
+    @Column(nullable = false, unique = true)
+    private String email;
+
+    @Column(name = "password_hash", nullable = false)
+    private String passwordHash;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private Role role = Role.LISTENER;
+
+    @Column(name = "created_at", nullable = false, updatable = false)
+    private LocalDateTime createdAt = LocalDateTime.now();
+
+    public enum Role { LISTENER, CREATOR, ADMIN }
+}
+
+------------------------------------------------------------
+
+FILE: src/main/java/com/soundkh/entity/Channel.java
+
+package com.soundkh.entity;
+
+import jakarta.persistence.*;
+import lombok.Getter;
+import lombok.Setter;
+import java.time.LocalDateTime;
+
+@Entity
+@Table(name = "channels")
+@Getter @Setter
+public class Channel {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "creator_id", nullable = false)
+    private User creator;
+
+    @Column(nullable = false)
+    private String name;
+
+    private String description;
+
+    @Column(name = "is_verified", nullable = false)
+    private boolean isVerified = false;
+
+    @Column(name = "created_at", nullable = false, updatable = false)
+    private LocalDateTime createdAt = LocalDateTime.now();
+}
+
+------------------------------------------------------------
+
+FILE: src/main/java/com/soundkh/entity/Track.java
+
+package com.soundkh.entity;
+
+import jakarta.persistence.*;
+import lombok.Getter;
+import lombok.Setter;
+import java.time.LocalDateTime;
+
+@Entity
+@Table(name = "tracks")
+@Getter @Setter
+public class Track {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "channel_id", nullable = false)
+    private Channel channel;
+
+    @Column(nullable = false)
+    private String title;
+
+    private Integer duration;
+
+    @Column(name = "s3_object_key", nullable = false)
+    private String s3ObjectKey;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private Visibility visibility = Visibility.PRIVATE;
+
+    @Column(name = "created_at", nullable = false, updatable = false)
+    private LocalDateTime createdAt = LocalDateTime.now();
+
+    public enum Visibility { PUBLIC, PRIVATE }
+}
+
+------------------------------------------------------------
+
+FILE: src/main/java/com/soundkh/entity/AccessRequest.java
+
+package com.soundkh.entity;
+
+import jakarta.persistence.*;
+import lombok.Getter;
+import lombok.Setter;
+import java.time.LocalDateTime;
+
+@Entity
+@Table(name = "access_requests")
+@Getter @Setter
+public class AccessRequest {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "track_id", nullable = false)
+    private Track track;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "user_id", nullable = false)
+    private User user;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private Status status = Status.PENDING;
+
+    @Column(name = "requested_at", nullable = false, updatable = false)
+    private LocalDateTime requestedAt = LocalDateTime.now();
+
+    public enum Status { PENDING, APPROVED, REJECTED }
+}
+
+=========================================================
+[6] OBJECT STORAGE: MinIO S3 Configuration
+=========================================================
+
+BUCKET STRATEGY:
+  soundkh-audio-raw      → Original uploads (WAV, MP3, FLAC)
+                           Key pattern: audio/{channel_id}/{track_id}/{filename}
+  soundkh-public-assets  → Public CDN-style assets (avatars, cover art)
+                           Key pattern: avatars/{user_id}/{filename}
+                                        covers/{channel_id}/{filename}
+
+FILE: src/main/java/com/soundkh/config/S3Config.java
+
+package com.soundkh.config;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.s3.S3Client;
+import java.net.URI;
+
+@Configuration
+public class S3Config {
+
+    @Value("${minio.endpoint}")
+    private String endpoint;
+
+    @Value("${minio.access-key}")
+    private String accessKey;
+
+    @Value("${minio.secret-key}")
+    private String secretKey;
+
+    @Bean
+    public S3Client s3Client() {
+        return S3Client.builder()
+                .endpointOverride(URI.create(endpoint))
+                .credentialsProvider(StaticCredentialsProvider.create(
+                        AwsBasicCredentials.create(accessKey, secretKey)))
+                .region(Region.US_EAST_1)
+                .forcePathStyle(true)   // REQUIRED for MinIO path-style URLs
+                .build();
+    }
+}
+
+------------------------------------------------------------
+
+FILE: src/main/java/com/soundkh/service/S3StorageService.java
+
+package com.soundkh.service;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.*;
+import java.io.InputStream;
+
+@Service
+public class S3StorageService {
+
+    private final S3Client s3Client;
+
+    public S3StorageService(S3Client s3Client) {
+        this.s3Client = s3Client;
+    }
+
+    @Value("${minio.bucket.audio-raw}")
+    private String audioRawBucket;
+
+    @Value("${minio.bucket.public-assets}")
+    private String publicAssetsBucket;
+
+    public String uploadAudio(String key, InputStream inputStream, long contentLength) {
+        s3Client.putObject(
+                PutObjectRequest.builder()
+                        .bucket(audioRawBucket)
+                        .key(key)
+                        .build(),
+                RequestBody.fromInputStream(inputStream, contentLength)
+        );
+        return key;
+    }
+
+    public String uploadPublicAsset(String key, InputStream inputStream, long contentLength) {
+        s3Client.putObject(
+                PutObjectRequest.builder()
+                        .bucket(publicAssetsBucket)
+                        .key(key)
+                        .build(),
+                RequestBody.fromInputStream(inputStream, contentLength)
+        );
+        return key;
+    }
+
+    public InputStream downloadAudio(String key) {
+        return s3Client.getObject(
+                GetObjectRequest.builder()
+                        .bucket(audioRawBucket)
+                        .key(key)
+                        .build()
+        );
+    }
+
+    public void deleteAudio(String key) {
+        s3Client.deleteObject(
+                DeleteObjectRequest.builder()
+                        .bucket(audioRawBucket)
+                        .key(key)
+                        .build()
+        );
+    }
+}
+
+=========================================================
+[7] APPLICATION CONFIGURATION: application.yml
+=========================================================
+
+FILE: src/main/resources/application.yml
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/soundkh
+    username: soundkh
+    password: soundkh_pass
+  jpa:
+    hibernate:
+      ddl-auto: update       # Phase 1: auto-create/update tables
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+
+minio:
+  endpoint: http://localhost:9000
+  access-key: minioadmin
+  secret-key: minioadmin123
+  bucket:
+    audio-raw: soundkh-audio-raw
+    public-assets: soundkh-public-assets
+
+NOTES:
+  - ddl-auto: update  → Hibernate auto-creates tables from entities (Phase 1 only)
+  - Phase 3+          → Switch to ddl-auto: validate + Flyway migrations
+  - For Proxmox deployment: change localhost → Proxmox server IP
+
+=========================================================
+[8] EXECUTION COMMANDS
+=========================================================
+
+STEP 1: Start infrastructure
+  cd /path/to/SoundKH
+  docker-compose up -d
+
+STEP 2: Verify containers
+  docker ps
+  # Expected: soundkh-postgres (5432), soundkh-minio (9000, 9001)
+
+STEP 3: Verify MinIO buckets
+  # Open browser: http://localhost:9001
+  # Login: minioadmin / minioadmin123
+  # Confirm buckets: soundkh-audio-raw, soundkh-public-assets
+
+STEP 4: Build and run Spring Boot
+  ./mvnw clean package -DskipTests
+  ./mvnw spring-boot:run
+
+STEP 5: Verify DB tables created
+  docker exec -it soundkh-postgres psql -U soundkh -d soundkh -c "\dt"
+  # Expected tables: users, channels, tracks, access_requests
+
+STEP 6: Smoke test upload (curl)
+  # Test via API once controllers are added in Phase 2
+
+=========================================================
+[9] PROJECT FILE STRUCTURE (Phase 1 Complete)
+=========================================================
+
+SoundKH/
+├── docker-compose.yml
+├── pom.xml
+├── phase1.txt                          ← THIS FILE
+└── src/
+    └── main/
+        ├── java/com/soundkh/
+        │   ├── SoundKHApplication.java
+        │   ├── config/
+        │   │   └── S3Config.java
+        │   ├── entity/
+        │   │   ├── User.java
+        │   │   ├── Channel.java
+        │   │   ├── Track.java
+        │   │   └── AccessRequest.java
+        │   └── service/
+        │       └── S3StorageService.java
+        └── resources/
+            └── application.yml
+
+=========================================================
+[10] PHASE ROADMAP (100-Phase Vision)
+=========================================================
+
+FOUNDATION (Phase 1-5)
+  Phase 1  ✓ PostgreSQL + MinIO + JPA Entities + S3StorageService
+  Phase 2    REST Controllers (UserController, TrackController, ChannelController)
+  Phase 3    Flyway DB migrations (replace ddl-auto: update)
+  Phase 4    Spring Security + JWT Authentication
+  Phase 5    RBAC enforcement (LISTENER / CREATOR / ADMIN roles)
+
+CORE FEATURES (Phase 6-20)
+  Phase 6    Audio upload endpoint (multipart/form-data → MinIO)
+  Phase 7    Audio streaming endpoint (byte-range requests)
+  Phase 8    Access request workflow (PENDING → APPROVED/REJECTED)
+  Phase 9    Channel management (create, verify, update)
+  Phase 10   Presigned URL generation for direct MinIO downloads
+  Phase 11   Pagination + filtering on track listings
+  Phase 12   Search API (title full-text search via PostgreSQL tsvector)
+  Phase 13   Email notifications (access request status changes)
+  Phase 14   Rate limiting (Bucket4j or Redis token bucket)
+  Phase 15   Caching layer (Redis for track metadata, user sessions)
+  Phase 16   Audio transcoding pipeline (FFmpeg integration)
+  Phase 17   Waveform generation (store as JSON in tracks table)
+  Phase 18   Playlist support (new table: playlists, playlist_tracks)
+  Phase 19   Follow system (users follow channels)
+  Phase 20   Activity feed (follows → new track notifications)
+
+SCALE & RELIABILITY (Phase 21-40)
+  Phase 21   Docker multi-stage build (optimized image)
+  Phase 22   Health checks + Spring Actuator endpoints
+  Phase 23   Structured logging (Logback JSON → ELK stack)
+  Phase 24   Distributed tracing (OpenTelemetry + Jaeger)
+  Phase 25   Metrics (Micrometer + Prometheus + Grafana)
+  Phase 26   PostgreSQL connection pooling (PgBouncer)
+  Phase 27   Read replica routing (primary write / replica read)
+  Phase 28   MinIO distributed mode (multi-node erasure coding)
+  Phase 29   CDN integration for public assets (Cloudflare R2 or AWS CloudFront)
+  Phase 30   Horizontal scaling (Spring Boot stateless, load balancer)
+  Phase 31   Circuit breaker (Resilience4j)
+  Phase 32   Async processing (Spring @Async + thread pool tuning)
+  Phase 33   Message queue (RabbitMQ or Kafka for upload events)
+  Phase 34   Event-driven transcoding (upload event → transcode worker)
+  Phase 35   Dead letter queue + retry logic
+  Phase 36   Database partitioning (tracks by created_at)
+  Phase 37   Archival strategy (cold storage for old audio files)
+  Phase 38   Backup automation (pg_dump + MinIO versioning)
+  Phase 39   Disaster recovery runbook
+  Phase 40   Load testing (Gatling or k6 benchmarks)
+
+SECURITY (Phase 41-55)
+  Phase 41   HTTPS / TLS termination (Nginx reverse proxy)
+  Phase 42   OAuth2 / Social login (Google, GitHub)
+  Phase 43   Refresh token rotation
+  Phase 44   API key management (for third-party integrations)
+  Phase 45   Input validation (Jakarta Bean Validation)
+  Phase 46   SQL injection audit (parameterized queries review)
+  Phase 47   CORS policy hardening
+  Phase 48   Content-Type validation on uploads (magic bytes check)
+  Phase 49   Virus scanning on uploads (ClamAV integration)
+  Phase 50   Audit log table (who did what, when)
+  Phase 51   GDPR compliance (data export, account deletion)
+  Phase 52   Secrets management (HashiCorp Vault or AWS Secrets Manager)
+  Phase 53   Penetration testing (OWASP ZAP)
+  Phase 54   DDoS protection (Cloudflare or AWS Shield)
+  Phase 55   Security headers (HSTS, CSP, X-Frame-Options)
+
+CLOUD MIGRATION (Phase 56-70)
+  Phase 56   Containerize with Docker Compose → Kubernetes manifests
+  Phase 57   Helm chart for SoundKH
+  Phase 58   CI/CD pipeline (GitHub Actions → build, test, deploy)
+  Phase 59   Staging environment (mirrors production)
+  Phase 60   Blue/green deployment strategy
+  Phase 61   MinIO → AWS S3 migration (endpoint swap, zero code change)
+  Phase 62   PostgreSQL → AWS RDS (connection string swap)
+  Phase 63   AWS EKS deployment
+  Phase 64   AWS CloudFront for audio delivery
+  Phase 65   AWS SQS/SNS for event messaging
+  Phase 66   AWS Lambda for lightweight processing tasks
+  Phase 67   Multi-region active-passive setup
+  Phase 68   AWS WAF integration
+  Phase 69   Cost optimization (S3 Intelligent-Tiering, RDS reserved instances)
+  Phase 70   Infrastructure as Code (Terraform for all AWS resources)
+
+ADVANCED FEATURES (Phase 71-90)
+  Phase 71   Recommendation engine (collaborative filtering)
+  Phase 72   Audio fingerprinting (copyright detection)
+  Phase 73   Lyrics sync (timestamped lyrics storage)
+  Phase 74   Comments and reactions on tracks
+  Phase 75   Monetization (creator revenue tracking)
+  Phase 76   Subscription tiers (FREE, PRO, ENTERPRISE)
+  Phase 77   Analytics dashboard (play counts, unique listeners)
+  Phase 78   Admin panel (user management, content moderation)
+  Phase 79   Mobile API optimizations (compressed responses, offline sync)
+  Phase 80   WebSocket for real-time notifications
+  Phase 81   Live audio streaming (HLS/DASH protocol)
+  Phase 82   Podcast support (RSS feed generation)
+  Phase 83   Embed player (iframe-embeddable audio widget)
+  Phase 84   Bulk upload API (ZIP extraction + batch processing)
+  Phase 85   AI-generated tags and descriptions (LLM integration)
+  Phase 86   Multi-language support (i18n)
+  Phase 87   Accessibility compliance (WCAG 2.1)
+  Phase 88   Dark/light theme API preferences
+  Phase 89   Third-party integrations (Spotify metadata, MusicBrainz)
+  Phase 90   Public developer API + API documentation (OpenAPI/Swagger)
+
+ENTERPRISE & BEYOND (Phase 91-100)
+  Phase 91   Multi-tenancy (white-label SoundKH for other platforms)
+  Phase 92   SLA monitoring and alerting
+  Phase 93   Chaos engineering (Chaos Monkey for resilience testing)
+  Phase 94   Data lake (export analytics to S3 + Athena queries)
+  Phase 95   Machine learning pipeline (audio classification)
+  Phase 96   Blockchain-based rights management (NFT audio licenses)
+  Phase 97   Edge computing (Cloudflare Workers for ultra-low latency)
+  Phase 98   Global anycast DNS (Route 53 latency-based routing)
+  Phase 99   99.99% uptime SLA architecture review
+  Phase 100  Full platform audit, documentation, and open-source release
+
+=========================================================
+STATUS: PHASE 1 - COMPLETE ✓
+NEXT:   PHASE 2 - REST Controllers
+=========================================================

@@ -1,0 +1,10 @@
+com/soundkh/service/AuthServiceTest.class
+com/soundkh/controller/TrackControllerTest.class
+com/soundkh/security/JwtUtilTest.class
+com/soundkh/service/TrackServiceTest.class
+com/soundkh/controller/AccessRequestControllerTest.class
+com/soundkh/controller/ChannelControllerTest.class
+com/soundkh/service/AccessRequestServiceTest.class
+com/soundkh/controller/AuthControllerTest.class
+com/soundkh/controller/BaseIntegrationTest.class
+com/soundkh/service/ChannelServiceTest.class
