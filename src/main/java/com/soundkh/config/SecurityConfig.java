@@ -39,6 +39,14 @@ public class SecurityConfig {
                         .requestMatchers("/api/auth/**").permitAll()
                         // admin
                         .requestMatchers("/api/admin/**").hasRole("ADMIN")
+                        // channel managers (owner or admin can assign/remove — enforced in service)
+                        .requestMatchers(HttpMethod.POST, "/api/channels/*/managers/**").authenticated()
+                        .requestMatchers(HttpMethod.DELETE, "/api/channels/*/managers/**").authenticated()
+                        .requestMatchers(HttpMethod.GET, "/api/channels/*/managers").authenticated()
+                        // channel follows
+                        .requestMatchers(HttpMethod.POST, "/api/channels/*/follow").authenticated()
+                        .requestMatchers(HttpMethod.DELETE, "/api/channels/*/follow").authenticated()
+                        .requestMatchers(HttpMethod.GET, "/api/channels/*/follow/count").permitAll()
                         // channel/track writes — must come BEFORE generic GET permitAll
                         .requestMatchers(HttpMethod.POST, "/api/tracks/**").hasAnyRole("SUPER_STAR", "ADMIN")
                         .requestMatchers(HttpMethod.POST, "/api/channels/**").authenticated()

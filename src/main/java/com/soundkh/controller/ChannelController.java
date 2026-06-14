@@ -2,6 +2,7 @@ package com.soundkh.controller;
 
 import com.soundkh.dto.ChannelDto;
 import com.soundkh.service.ChannelService;
+import com.soundkh.service.ChannelStatsService;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -15,9 +16,11 @@ import java.util.List;
 public class ChannelController {
 
     private final ChannelService channelService;
+    private final ChannelStatsService channelStatsService;
 
-    public ChannelController(ChannelService channelService) {
+    public ChannelController(ChannelService channelService, ChannelStatsService channelStatsService) {
         this.channelService = channelService;
+        this.channelStatsService = channelStatsService;
     }
 
     @PostMapping
@@ -37,8 +40,10 @@ public class ChannelController {
     }
 
     @GetMapping("/{id}")
-    public ResponseEntity<ChannelDto.Response> get(@PathVariable Long id) {
-        return ResponseEntity.ok(channelService.get(id));
+    public ResponseEntity<ChannelDto.Response> get(@PathVariable Long id,
+                                                    @AuthenticationPrincipal UserDetails user) {
+        String viewer = user != null ? user.getUsername() : null;
+        return ResponseEntity.ok(channelService.get(id, viewer));
     }
 
     @GetMapping("/search")
@@ -51,6 +56,11 @@ public class ChannelController {
                                                        @Valid @RequestBody ChannelDto.UpdateRequest req,
                                                        @AuthenticationPrincipal UserDetails user) {
         return ResponseEntity.ok(channelService.update(id, req, user.getUsername()));
+    }
+
+    @GetMapping("/{id}/stats")
+    public ResponseEntity<ChannelDto.StatsResponse> stats(@PathVariable Long id) {
+        return ResponseEntity.ok(channelStatsService.getStats(id));
     }
 
     @DeleteMapping("/{id}")

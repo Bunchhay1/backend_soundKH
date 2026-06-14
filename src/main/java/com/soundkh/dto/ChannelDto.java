@@ -19,5 +19,9 @@ public class ChannelDto {
 
     public record Response(Long id, String name, String description,
                            boolean isVerified, String creatorUsername,
-                           Channel.Visibility visibility) {}
+                           Channel.Visibility visibility,
+                           long followerCount,
+                           boolean isFollowing) {}
+
+    public record StatsResponse(long followerCount, long totalPlays, long totalLikes) {}
 }
