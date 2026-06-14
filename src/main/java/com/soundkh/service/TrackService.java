@@ -84,7 +84,6 @@ public class TrackService {
     }
 
     // Phase 11: Pagination + genre filter
-    @Cacheable(value = "tracks", key = "#channelId + '_' + #page + '_' + #size + '_' + #genre")
     public Page<TrackDto.Response> listByChannel(Long channelId, int page, int size, String genre) {
         var pageable = PageRequest.of(page, size, Sort.by("createdAt").descending());
         Page<Track> result = (genre != null && !genre.isBlank())
