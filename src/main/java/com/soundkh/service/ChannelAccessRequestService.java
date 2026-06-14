@@ -44,8 +44,14 @@ public class ChannelAccessRequestService {
         var car = new ChannelAccessRequest();
         car.setChannel(channel);
         car.setUser(user);
+
+        // Auto-approve for public channels (follow)
+        if (channel.getVisibility() == com.soundkh.entity.Channel.Visibility.PUBLIC) {
+            car.setStatus(ChannelAccessRequest.Status.APPROVED);
+        }
+
         repo.save(car);
-        return Map.of("channelId", channelId, "status", "PENDING");
+        return Map.of("channelId", channelId, "status", car.getStatus().name());
     }
 
     public List<Map<String, Object>> listPending(String username) {
